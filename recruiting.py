@@ -198,6 +198,7 @@ def aggregate_athletes(event_results):
             seen_names.add((key, race_id))
             athletes[key]["names"].add(athlete["name"])
             athletes[key]["clubs"].add(athlete.get("club", ""))
+            athletes[key]["age"] = athlete.get("age", "")
             athletes[key]["races"].append(
                 {
                     "event": result["event"],
@@ -217,22 +218,15 @@ def write_athletes_to_csv(athletes, filename="athletes.csv"):
     # Flatten the athlete data for CSV output
     with open(filename, "w", newline='', encoding="utf-8") as csvfile:
         fieldnames = [
-            "athlete_name", "club", "seat", "event", "race", "place", "bow", "finish", "margin"
+            "athlete_name", "age", "club", "seat", "event", "race", "place", "bow", "finish", "margin"
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for name, info in athletes.items():
             for race in info["races"]:
-                # Find the matching athlete dict for this race (by name and club)
-                matching_athlete = None
-                for a in info["names"]:
-                    # Try to match club and name
-                    if a == name:
-                        matching_athlete = a
-                        break
-                # For each seat (if any), otherwise just write one row per race
                 writer.writerow({
                     "athlete_name": name,
+                    "age": info.get("age", ""),
                     "club": ", ".join(info["clubs"]),
                     "seat": race["seat"],
                     "event": race["event"],
@@ -245,8 +239,7 @@ def write_athletes_to_csv(athletes, filename="athletes.csv"):
 
 
 def main():
-    with open("sample.txt", "r", encoding="utf-8") as f:
-        html = f.read()
+    html = requests.get(main_results_url, verify=False).text
     event_links = get_event_links(html)
 
     # Sequential fetching and parsing of event JSONs (no concurrency)
