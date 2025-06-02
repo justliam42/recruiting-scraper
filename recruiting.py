@@ -6,6 +6,7 @@ from bs4 import BeautifulSoup
 import urllib3
 import concurrent.futures
 import csv
+import time
 
 # Disable unverified HTTPS request warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -172,7 +173,6 @@ def aggregate_athletes(event_results):
         lambda: {
             "races": [],
             "clubs": set(),
-            "seats": set(),
             "names": set(),
         }
     )
@@ -198,8 +198,6 @@ def aggregate_athletes(event_results):
             seen_names.add((key, race_id))
             athletes[key]["names"].add(athlete["name"])
             athletes[key]["clubs"].add(athlete.get("club", ""))
-            if athlete.get("seat"):
-                athletes[key]["seats"].add(athlete["seat"])
             athletes[key]["races"].append(
                 {
                     "event": result["event"],
@@ -209,6 +207,7 @@ def aggregate_athletes(event_results):
                     "club": result["club"],
                     "finish": result["finish"],
                     "margin": result["margin"],
+                    "seat": athlete.get("seat", ""),
                 }
             )
     return athletes
@@ -232,19 +231,17 @@ def write_athletes_to_csv(athletes, filename="athletes.csv"):
                         matching_athlete = a
                         break
                 # For each seat (if any), otherwise just write one row per race
-                seats = info["seats"] if info["seats"] else [""]
-                for seat in seats:
-                    writer.writerow({
-                        "athlete_name": name,
-                        "club": ", ".join(info["clubs"]),
-                        "seat": seat,
-                        "event": race["event"],
-                        "race": race["race"],
-                        "place": race["place"],
-                        "bow": race["bow"],
-                        "finish": race["finish"],
-                        "margin": race["margin"],
-                    })
+                writer.writerow({
+                    "athlete_name": name,
+                    "club": ", ".join(info["clubs"]),
+                    "seat": race["seat"],
+                    "event": race["event"],
+                    "race": race["race"],
+                    "place": race["place"],
+                    "bow": race["bow"],
+                    "finish": race["finish"],
+                    "margin": race["margin"],
+                })
 
 
 def main():
@@ -252,33 +249,37 @@ def main():
         html = f.read()
     event_links = get_event_links(html)
 
-    # Parallelize fetching and parsing of event JSONs
-    def fetch_and_parse(link):
-        m = re.search(r'job_id=(\d+)&event_id=(\d+)', link)
-        if not m:
-            return []
-        job_id, event_id = m.group(1), m.group(2)
-        json_str = fetch_event_results_json(job_id, event_id)
-        if not json_str:
-            return []
-        return parse_event_results_json(json_str, job_id=job_id)
-
+    # Sequential fetching and parsing of event JSONs (no concurrency)
     all_event_results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(fetch_and_parse, link) for link in event_links]
-        for future in concurrent.futures.as_completed(futures):
-            all_event_results.extend(future.result())
+    for link in event_links:
+        m = re.search(r'job_id=(\d+)&?.*&event_id=(\d+)', link)
+        if not m:
+            continue
+        job_id, event_id = m.group(1), m.group(2)
+        # Try up to 3 times to fetch event results if null
+        json_str = None
+        for attempt in range(3):
+            json_str = fetch_event_results_json(job_id, event_id)
+            if json_str:
+                break
+            print(f"Attempt {attempt+1} failed for job_id={job_id}, event_id={event_id}, retrying...")
+            time.sleep(2)
+        if not json_str:
+            print(f"Skipping event {job_id=} {event_id=}: no data returned")
+            continue
+        time.sleep(1)
+        event_results = parse_event_results_json(json_str, job_id=job_id)
+        all_event_results.extend(event_results)
 
     print(all_event_results)
     athletes = aggregate_athletes(all_event_results)
     for name, info in athletes.items():
         print(f"Athlete: {name}")
         print(f"  Clubs: {', '.join(info['clubs'])}")
-        print(f"  Seats: {', '.join(info['seats'])}")
         print(f"  Races:")
         for race in info["races"]:
             print(
-                f"    - Event: {race['event']}, Race: {race['race']}, Place: {race['place']}, Club: {race['club']}, Finish: {race['finish']}"
+                f"    - Event: {race['event']}, Race: {race['race']}, Place: {race['place']}, Club: {race['club']}, Finish: {race['finish']}, Seat: {race['seat']}"
             )
         print()
     write_athletes_to_csv(athletes)
