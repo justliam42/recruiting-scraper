@@ -70,13 +70,20 @@ def parse_event_results_json(json_str, job_id=None, event_name=None):
         event_name = data.get("long_desc") or data.get("event_label") or ""
     results = []
     races = data.get("races", [])
-    # Map boat_id to its lineup (athletes)
-    boat_lineups = {}
-    # Collect all (job_id, boat_id) pairs for parallel lineup fetching
-    boat_ids = []
-    race_info = []
+
+    # Collect all unique (job_id, boat_id) pairs for lineup fetching
+    boat_ids = set()
+    race_rows = []
     for race in races:
-        race_name = race.get("stageName", "") or race.get("displayNumber", "") or race.get("raceName", "") or "Final"
+        race_name = (
+            race.get("stageName", "")
+            or race.get("displayNumber", "")
+            or race.get("raceName", "")
+            or "Final"
+        )
+
+        num_boats = 0
+        rows = []
         for result in race.get("results", []):
             boat_id = str(result.get("boatId")) if result.get("boatId") else None
             boat_label = result.get("boatLabel") or ""
@@ -88,6 +95,8 @@ def parse_event_results_json(json_str, job_id=None, event_name=None):
                 or result.get("officialPlace")
                 or ""
             )
+            if place != "": num_boats += 1
+
             bow = result.get("lane", "")
             finish = (
                 result.get("finishTimeString")
@@ -102,7 +111,7 @@ def parse_event_results_json(json_str, job_id=None, event_name=None):
                 or result.get("officialMarginString")
                 or ""
             )
-            race_info.append({
+            rows.append({
                 "boat_id": boat_id,
                 "boat_label": boat_label,
                 "club_name": club_name,
@@ -113,46 +122,46 @@ def parse_event_results_json(json_str, job_id=None, event_name=None):
                 "race_name": race_name,
             })
             if boat_id and job_id:
-                boat_ids.append((job_id, boat_id))
-    # Fetch all lineups in parallel, but only once per (job_id, boat_id)
+                boat_ids.add((job_id, boat_id))
+
+        for row in rows: row["num_boats"] = num_boats
+        race_rows.extend(rows)
+
+    # Fetch all lineups in parallel, once per (job_id, boat_id)
     import concurrent.futures
+    boat_lineups = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_boat = {
             executor.submit(fetch_lineup, job_id, boat_id): (job_id, boat_id)
-            for (job_id, boat_id) in set(boat_ids)
+            for (job_id, boat_id) in boat_ids
         }
         for future in concurrent.futures.as_completed(future_to_boat):
-            job_id_b, boat_id_b = future_to_boat[future]
+            _, boat_id_b = future_to_boat[future]
             try:
                 boat_lineups[boat_id_b] = future.result()
             except Exception:
                 boat_lineups[boat_id_b] = []
+
     # Build results
-    for info in race_info:
+    for info in race_rows:
         boat_id = info["boat_id"]
         club_name = info["club_name"]
-        # Use the lineup if available, otherwise fallback to boat_label
         athletes = []
         if boat_id and boat_id in boat_lineups and boat_lineups[boat_id]:
-            # Use the actual lineup, but only include athletes whose club matches the club for this result
-            # (sometimes the lineup API returns athletes from other clubs if the boat_id is reused)
+            # Only include athletes whose club matches the club for this result
             for a in boat_lineups[boat_id]:
-                # Only include if club matches, or if club is missing in the result, include all
                 if club_name and a["club"] and club_name.lower() in a["club"].lower():
                     athletes.append(a)
                 elif not club_name:
                     athletes.append(a)
-            # If nothing matched, fallback to all
             if not athletes:
                 athletes = boat_lineups[boat_id]
-        else:
-            # fallback: just use the boat label if no lineup
-            if info["boat_label"]:
-                athletes.append({
-                    "name": info["boat_label"],
-                    "seat": None,
-                    "club": club_name,
-                })
+        elif info["boat_label"]:
+            athletes.append({
+                "name": info["boat_label"],
+                "seat": None,
+                "club": club_name,
+            })
         if not athletes:
             continue
         results.append({
@@ -164,6 +173,7 @@ def parse_event_results_json(json_str, job_id=None, event_name=None):
             "athletes": athletes,
             "finish": info["finish"],
             "margin": info["margin"],
+            "num_boats": info["num_boats"],
         })
     return results
 
@@ -209,6 +219,7 @@ def aggregate_athletes(event_results):
                     "finish": result["finish"],
                     "margin": result["margin"],
                     "seat": athlete.get("seat", ""),
+                    "num_boats": result["num_boats"],
                 }
             )
     return athletes
@@ -218,7 +229,7 @@ def write_athletes_to_csv(athletes, filename="athletes.csv"):
     # Flatten the athlete data for CSV output
     with open(filename, "w", newline='', encoding="utf-8") as csvfile:
         fieldnames = [
-            "athlete_name", "age", "club", "seat", "event", "race", "place", "bow", "finish", "margin"
+            "athlete_name", "age", "club", "seat", "event", "race", "place", "bow", "finish", "margin", "num_boats"
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -235,6 +246,7 @@ def write_athletes_to_csv(athletes, filename="athletes.csv"):
                     "bow": race["bow"],
                     "finish": race["finish"],
                     "margin": race["margin"],
+                    "num_boats": race["num_boats"],
                 })
 
 
@@ -264,7 +276,6 @@ def main():
         event_results = parse_event_results_json(json_str, job_id=job_id)
         all_event_results.extend(event_results)
 
-    print(all_event_results)
     athletes = aggregate_athletes(all_event_results)
     for name, info in athletes.items():
         print(f"Athlete: {name}")
@@ -272,7 +283,7 @@ def main():
         print(f"  Races:")
         for race in info["races"]:
             print(
-                f"    - Event: {race['event']}, Race: {race['race']}, Place: {race['place']}, Club: {race['club']}, Finish: {race['finish']}, Seat: {race['seat']}"
+                f"    - Event: {race['event']}, Race: {race['race']}, Place: {race['place']}, Club: {race['club']}, Finish: {race['finish']}, Seat: {race['seat']}, Boat Count: {race['num_boats']}"
             )
         print()
     write_athletes_to_csv(athletes)
